@@ -5,6 +5,7 @@ export interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElemen
   size?: string;
 }
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>((props, ref) => {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const { variant = 'primary', size = 'md', className = '', ...rest } = props;
 
   return (

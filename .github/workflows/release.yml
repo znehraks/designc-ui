@@ -1,8 +1,6 @@
-# .github/workflows/release.yml
 name: Release
 
 on:
-  # master로의 직접 push와 PR merge 모두 감지
   push:
     branches:
       - master
@@ -13,7 +11,6 @@ on:
 
 jobs:
   release:
-    # PR의 경우 머지된 경우만 실행, push의 경우 항상 실행
     if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.merged == true)
     name: Create Release
     runs-on: ubuntu-latest
@@ -26,7 +23,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v3
         with:
-          node-version: 18
+          node-version: 20
           registry-url: 'https://registry.npmjs.org'
 
       - name: Setup PNPM
@@ -34,7 +31,6 @@ jobs:
         with:
           version: latest
 
-      # 커밋 메시지 분석해서 버전 결정
       - name: Determine Version
         id: version
         run: |
@@ -42,7 +38,6 @@ jobs:
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             COMMITS=$(git log ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }} --pretty=format:"%s")
           else
-            # 마지막 태그(또는 없으면 처음 커밋)부터 현재까지의 커밋
             LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || git rev-list --max-parents=0 HEAD)
             COMMITS=$(git log $LAST_TAG..HEAD --pretty=format:"%s")
           fi
@@ -50,70 +45,67 @@ jobs:
           echo "Analyzing commits:"
           echo "$COMMITS"
 
-          # 버전 변경 타입 결정
+          # 버전 타입 설정
+          VERSION_TYPE="patch"  # 기본값 설정
           if echo "$COMMITS" | grep -q "^BREAKING CHANGE:\|!:"; then
-            echo "VERSION_TYPE=major" >> $GITHUB_OUTPUT
-            echo "Found BREAKING CHANGE - incrementing major version"
+            VERSION_TYPE="major"
           elif echo "$COMMITS" | grep -q "^feat:\|^feature:"; then
-            echo "VERSION_TYPE=minor" >> $GITHUB_OUTPUT
-            echo "Found feature - incrementing minor version"
+            VERSION_TYPE="minor"
           elif echo "$COMMITS" | grep -q "^fix:\|^bugfix:"; then
-            echo "VERSION_TYPE=patch" >> $GITHUB_OUTPUT
-            echo "Found fix - incrementing patch version"
-          else
-            echo "VERSION_TYPE=patch" >> $GITHUB_OUTPUT
-            echo "No specific version increment found - defaulting to patch"
+            VERSION_TYPE="patch"
           fi
-
-          # 현재 버전 가져오기
+          
+          # 현재 버전 확인
           CURRENT_VERSION=$(node -p "require('./package.json').version")
-          echo "Current version: $CURRENT_VERSION"
-
+          if [ -z "$CURRENT_VERSION" ]; then
+            echo "Error: Could not determine current version"
+            exit 1
+          fi
+          
           # 새 버전 계산
-          NEW_VERSION=$(node -e "
-            const [major, minor, patch] = '${CURRENT_VERSION}'.split('.');
-            const type = '${VERSION_TYPE}';
-            let newVersion;
-            switch(type) {
-              case 'major':
-                newVersion = \`\${Number(major) + 1}.0.0\`;
-                break;
-              case 'minor':
-                newVersion = \`\${major}.\${Number(minor) + 1}.0\`;
-                break;
-              case 'patch':
-                newVersion = \`\${major}.\${minor}.\${Number(patch) + 1}\`;
-                break;
-            }
-            console.log(newVersion);
-          ")
+          IFS='.' read -r -a version_parts <<< "$CURRENT_VERSION"
+          MAJOR="${version_parts[0]}"
+          MINOR="${version_parts[1]}"
+          PATCH="${version_parts[2]}"
+          
+          case $VERSION_TYPE in
+            major)
+              NEW_VERSION="$((MAJOR + 1)).0.0"
+              ;;
+            minor)
+              NEW_VERSION="${MAJOR}.$((MINOR + 1)).0"
+              ;;
+            patch)
+              NEW_VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))"
+              ;;
+          esac
+          
+          echo "version_type=$VERSION_TYPE" >> $GITHUB_OUTPUT
+          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "Determined new version: $NEW_VERSION"
 
-          echo "New version: $NEW_VERSION"
-          echo "NEW_VERSION=$NEW_VERSION" >> $GITHUB_OUTPUT
-
-      # package.json 버전 업데이트
       - name: Update Version
         run: |
-          npm version ${{ steps.version.outputs.NEW_VERSION }} --no-git-tag-version
-          echo "Updated package.json to version ${{ steps.version.outputs.NEW_VERSION }}"
+          if [ -z "${{ steps.version.outputs.new_version }}" ]; then
+            echo "Error: New version is undefined"
+            exit 1
+          fi
+          npm version ${{ steps.version.outputs.new_version }} --no-git-tag-version
+          echo "Updated package.json to version ${{ steps.version.outputs.new_version }}"
 
-      # 의존성 설치 및 빌드
       - name: Install dependencies
         run: pnpm install
 
       - name: Build
         run: pnpm build
 
-      # npm 배포
       - name: Publish to NPM
         run: pnpm publish --no-git-tag-version
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      # GitHub 릴리스 생성
       - name: Create GitHub Release
         run: |
-          # 변경사항 목록 생성
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             CHANGELOG=$(git log ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }} --pretty=format:"* %s")
           else
@@ -121,18 +113,13 @@ jobs:
             CHANGELOG=$(git log $LAST_TAG..HEAD --pretty=format:"* %s")
           fi
 
-          echo "Changes in this release:"
-          echo "$CHANGELOG"
-
-          # 태그 생성 및 푸시
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          git tag -a v${{ steps.version.outputs.NEW_VERSION }} -m "Release v${{ steps.version.outputs.NEW_VERSION }}"
-          git push origin v${{ steps.version.outputs.NEW_VERSION }}
+          git tag -a v${{ steps.version.outputs.new_version }} -m "Release v${{ steps.version.outputs.new_version }}"
+          git push origin v${{ steps.version.outputs.new_version }}
 
-          # GitHub 릴리스 생성
-          gh release create v${{ steps.version.outputs.NEW_VERSION }} \
-            --title "Release v${{ steps.version.outputs.NEW_VERSION }}" \
+          gh release create v${{ steps.version.outputs.new_version }} \
+            --title "Release v${{ steps.version.outputs.new_version }}" \
             --notes "$CHANGELOG"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
